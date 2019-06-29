@@ -8,7 +8,7 @@ DWORD WINAPI UmsThread(PVOID Arg)
         printf("UMS Thread %i\r\n", static_cast<int>(GetCurrentThreadId()));
         Sleep(100);
     }
-    printf("UMS Thread %i finished\r\n", static_cast<int>(GetCurrentProcessId()));
+    printf("UMS Thread %i finished\r\n", static_cast<int>(GetCurrentThreadId()));
     return 0;
 }
 

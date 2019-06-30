@@ -84,8 +84,20 @@ void TestThreadClass()
 
 int main()
 {
-    TestThreadClass();
+    volatile int i = 1337; // Value that will be pass to another thread
 
+    // Run async task:
+    Threads::Async([&]() -> DWORD { 
+        Sleep(1000);
+        printf("[%u] External value = %i\r\n", Threads::Id(), i);
+        return 0;
+    });
+
+    i = 0; // Changing the 'global' value
+
+    printf("[%u] Value 'i' changed to %i\r\n", Threads::Id(), i);
+
+    // To prevent an app closing:
     MSG Message = {};
     while (GetMessage(&Message, NULL, 0, 0)) {
         TranslateMessage(&Message);

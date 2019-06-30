@@ -36,6 +36,10 @@
     #include <deque>
 #endif
 
+#ifndef _FUNCTIONAL_
+    #include <functional>
+#endif
+
 #pragma comment(lib, "ntdll.lib")
 
 namespace Ariadna {
@@ -339,11 +343,69 @@ namespace Ariadna {
         extern "C" NTSYSAPI NTSTATUS NTAPI NtAlertThread(IN HANDLE ThreadHandle);
     }
 
-    class Threads {  
+    class Threads {
+    private:
+        template <class Tuple, size_t... indices>
+        static unsigned __stdcall stub(void* arg) noexcept
+        {
+            const std::unique_ptr<Tuple> fn_vals(static_cast<Tuple*>(arg));
+            Tuple& tuple = *fn_vals;
+            return std::invoke(std::move(std::get<indices>(tuple))...);
+        }
+
+        template <class Tuple, size_t... indices>
+        static constexpr auto get_invoke(std::index_sequence<indices...>) noexcept
+        {
+            return &stub<Tuple, indices...>;
+        }
+
     public:
         static inline HANDLE StartThread(IN LPTHREAD_START_ROUTINE ThreadProc, IN PVOID Arg = NULL, OUT OPTIONAL PDWORD ThreadId = NULL)
         {
             return CreateThread(NULL, 0, ThreadProc, Arg, 0, ThreadId);
+        }
+
+        static inline HANDLE CreateSuspended(IN LPTHREAD_START_ROUTINE ThreadProc, IN PVOID Arg = NULL, OUT OPTIONAL PDWORD ThreadId = NULL)
+        {
+            return CreateThread(NULL, 0, ThreadProc, Arg, CREATE_SUSPENDED, ThreadId);
+        }
+
+        static inline BOOL CallAsync(IN LPTHREAD_START_ROUTINE ThreadProc, IN PVOID Arg = NULL, OUT OPTIONAL PDWORD ThreadId = NULL)
+        {
+            HANDLE hThread = StartThread(ThreadProc, Arg, ThreadId);
+            if (hThread) {
+                return CloseHandle(hThread);
+            }
+            else {
+                return FALSE;
+            }
+        }
+
+        template <class Func, class... Args, class = std::enable_if_t<!std::is_same_v<std::_Remove_cvref_t<Func>, Threads>>>
+        static HANDLE Run(Func&& func, Args&& ... args)
+        {
+            using FuncTuple = std::tuple<std::decay_t<Func>, std::decay_t<Args>...>;
+            auto decay_copied = std::make_unique<FuncTuple>(std::forward<Func>(func), std::forward<Args>(args)...);
+            constexpr auto invoker = get_invoke<FuncTuple>(std::make_index_sequence<1 + sizeof...(Args)>{});
+            HANDLE hThread = CreateThread(NULL, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(invoker), decay_copied.get(), 0, NULL);
+            if (hThread) decay_copied.release(); // Ownership transferred to the thread
+            return hThread;
+        }
+
+        template <class Func, class... Args, class = std::enable_if_t<!std::is_same_v<std::_Remove_cvref_t<Func>, Threads>>>
+        static BOOL Async(Func&& func, Args&& ... args)
+        {
+            using FuncTuple = std::tuple<std::decay_t<Func>, std::decay_t<Args>...>;
+            auto decay_copied = std::make_unique<FuncTuple>(std::forward<Func>(func), std::forward<Args>(args)...);
+            constexpr auto invoker = get_invoke<FuncTuple>(std::make_index_sequence<1 + sizeof...(Args)>{});
+            HANDLE hThread = CreateThread(NULL, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(invoker), decay_copied.get(), 0, NULL);
+            if (hThread) {
+                decay_copied.release(); // Ownership transferred to the thread
+                return CloseHandle(hThread);
+            }
+            else {
+                return FALSE;
+            }
         }
 
         static inline HANDLE Current() { return GetCurrentThread(); }
@@ -429,8 +491,8 @@ namespace Ariadna {
             }
         }
 
-        inline HANDLE Start() {
-            hThread = CreateThread(NULL, 0, ThreadProc, Arg, 0, &ThreadId);
+        inline HANDLE Start(IN BOOL Suspended = FALSE) {
+            hThread = CreateThread(NULL, 0, ThreadProc, Arg, Suspended ? CREATE_SUSPENDED : 0, &ThreadId);
             return hThread;
         }
 
@@ -469,6 +531,35 @@ namespace Ariadna {
         inline INT GetPriority() { return Threads::GetPriority(hThread); }
         inline SIZE_T SetAffinity(IN SIZE_T AffinityMask) { return Threads::SetAffinity(hThread, AffinityMask); }
         inline HRESULT SetName(IN LPCWSTR Name) { return Threads::SetName(hThread, Name); }
+    };
+
+    class ThreadWrapped : public Thread {
+    private:
+        template <class Tuple, size_t... indices>
+        static unsigned __stdcall stub(void* arg) noexcept
+        {
+            const std::unique_ptr<Tuple> fn_vals(static_cast<Tuple*>(arg));
+            Tuple& tuple = *fn_vals;
+            return std::invoke(std::move(std::get<indices>(tuple))...);
+        }
+
+        template <class Tuple, size_t... indices>
+        static constexpr auto get_invoke(std::index_sequence<indices...>) noexcept
+        {
+            return &stub<Tuple, indices...>;
+        }
+    public:
+        template <class Func, class... Args, class = std::enable_if_t<!std::is_same_v<std::_Remove_cvref_t<Func>, Thread>>>
+        ThreadWrapped(Func&& func, Args&& ... args)
+            : Thread(NULL, NULL)
+        {
+            using FuncTuple = std::tuple<std::decay_t<Func>, std::decay_t<Args>...>;
+            auto decay_copied = std::make_unique<FuncTuple>(std::forward<Func>(func), std::forward<Args>(args)...);
+            constexpr auto invoker = get_invoke<FuncTuple>(std::make_index_sequence<1 + sizeof...(Args)>{});
+            ThreadProc = reinterpret_cast<LPTHREAD_START_ROUTINE>(invoker);
+            Arg = decay_copied.get();
+            decay_copied.release(); // Ownership transferred to the thread
+        }
     };
 
     class AbstractThread : public Thread {

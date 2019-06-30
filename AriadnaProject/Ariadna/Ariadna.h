@@ -24,9 +24,19 @@
     #endif
 #endif
 
+#ifndef _WINTERNL_
+    #include <winternl.h>
+#endif
+
+#ifndef _NTSTATUS_
+    #include <ntstatus.h>
+#endif
+
 #ifndef _DEQUE_
     #include <deque>
 #endif
+
+#pragma comment(lib, "ntdll.lib")
 
 namespace Ariadna {
 
@@ -182,6 +192,10 @@ namespace Ariadna {
         }
 
     public:
+        UmsScheduler(const UmsScheduler&) = delete;
+        UmsScheduler(UmsScheduler&&) = delete;
+        UmsScheduler& operator = (const UmsScheduler&) = delete;
+        UmsScheduler& operator = (UmsScheduler&&) = delete;
 
         static UmsScheduler& GetInstance()
         {
@@ -270,4 +284,209 @@ namespace Ariadna {
     };
 #endif
 
+    class Fibers {
+    public:
+        // Returns address of the fiber:
+        static inline PVOID ThreadToFiber(IN OPTIONAL PVOID Parameter = NULL) { return ConvertThreadToFiber(Parameter); }
+        static inline BOOL FiberToThread() { return ConvertFiberToThread(); }
+        static inline PVOID GetData() { return GetFiberData(); }
+        static inline PVOID Current() {
+            const PVOID FiberMagic = reinterpret_cast<PVOID>(0x1E00);
+            PVOID CurrentFiber = GetCurrentFiber();
+            return CurrentFiber != FiberMagic ? CurrentFiber : NULL;
+        }
+        static inline PVOID Create(IN LPFIBER_START_ROUTINE FiberProc, IN PVOID Arg) { return CreateFiber(0, FiberProc, Arg); }
+        static inline VOID SwitchTo(IN PVOID Fiber) { return SwitchToFiber(Fiber); }
+        static BOOL CallInFiber(IN LPFIBER_START_ROUTINE FiberProc, IN OPTIONAL PVOID Arg = NULL)
+        {
+            PVOID CurrentFiber = Current();
+            BOOLEAN IsAlreadyFiber = CurrentFiber != NULL;
+            
+            if (!IsAlreadyFiber)
+                CurrentFiber = ConvertThreadToFiber(NULL);
+
+            struct FIBER_ARGS {
+                LPFIBER_START_ROUTINE FiberProc;
+                PVOID Arg;
+                PVOID PreviousFiber;
+            } FiberArgs = { FiberProc, Arg, CurrentFiber };
+
+            PVOID Fiber = CreateFiber(0, [](PVOID Arg) {
+                auto Args = reinterpret_cast<FIBER_ARGS*>(Arg);
+                Args->FiberProc(Args->Arg);
+                SwitchToFiber(Args->PreviousFiber);
+            }, &FiberArgs);
+
+            if (!Fiber) return FALSE;
+            SwitchToFiber(Fiber);
+
+            if (!IsAlreadyFiber)
+                ConvertFiberToThread();
+
+            return TRUE;
+        }
+    };
+
+    namespace NtApi {
+        extern "C" NTSYSAPI NTSTATUS NTAPI NtQueueApcThread(
+            IN HANDLE ThreadHandle,
+            IN PIO_APC_ROUTINE ApcRoutine,
+            IN OPTIONAL PVOID ApcRoutineContext,
+            IN OPTIONAL PIO_STATUS_BLOCK ApcStatusBlock,
+            IN OPTIONAL ULONG ApcReserved
+        );
+        extern "C" NTSYSAPI NTSTATUS NTAPI NtTestAlert();
+        extern "C" NTSYSAPI NTSTATUS NTAPI NtAlertThread(IN HANDLE ThreadHandle);
+    }
+
+    class Threads {  
+    public:
+        static inline HANDLE StartThread(IN LPTHREAD_START_ROUTINE ThreadProc, IN PVOID Arg = NULL, OUT OPTIONAL PDWORD ThreadId = NULL)
+        {
+            return CreateThread(NULL, 0, ThreadProc, Arg, 0, ThreadId);
+        }
+
+        static inline HANDLE Current() { return GetCurrentThread(); }
+        static inline DWORD Id() { return GetCurrentThreadId(); }
+
+        static inline HANDLE Open(IN DWORD ThreadId, IN OPTIONAL DWORD Access = THREAD_ALL_ACCESS) { return OpenThread(Access, FALSE, ThreadId); }
+        static inline BOOL Close(IN HANDLE hThread) { return CloseHandle(hThread); }
+        static inline BOOL Close(IN OUT PHANDLE hThread) {
+            if (hThread) {
+                BOOL Status = Close(*hThread);
+                if (Status) *hThread = NULL;
+                return Status;
+            } else {
+                return FALSE;
+            }
+        }
+        static inline DWORD GetTid(IN HANDLE hThread) { return GetThreadId(hThread); }
+        static inline DWORD GetPid(IN HANDLE hThread) { return GetProcessIdOfThread(hThread); }
+
+        static inline DWORD Wait(IN HANDLE hThread, IN DWORD Timeout) { return WaitForSingleObject(hThread, Timeout); }
+        static inline BOOL IsTerminated(IN HANDLE hThread) { return Wait(hThread, 0) == WAIT_OBJECT_0; }
+        static inline BOOL Terminate(IN HANDLE hThread, IN OPTIONAL DWORD ExitCode = 0) {
+#pragma warning(push)
+#pragma warning(disable : 6258) // Yes, TerminateThread is unsafe
+            return TerminateThread(hThread, ExitCode);
+#pragma warning(pop)
+        }
+        static inline BOOL GetExitCode(IN HANDLE hThread, OUT PDWORD ExitCode) { return GetExitCodeThread(hThread, ExitCode); }
+        static inline DWORD GetExitCode(IN HANDLE hThread, IN OPTIONAL DWORD DefaultValue = 0) {
+            DWORD ExitCode = 0;
+            return GetExitCode(hThread, &ExitCode) ? ExitCode : DefaultValue;
+        }
+
+        static inline DWORD Suspend(IN HANDLE hThread) { return SuspendThread(hThread); }
+        static inline DWORD Resume(IN HANDLE hThread) { return ResumeThread(hThread); }
+        
+        static inline BOOL GetContext(IN HANDLE hThread, OUT PCONTEXT Context) { return GetThreadContext(hThread, Context); }
+        static inline BOOL SetContext(IN HANDLE hThread, IN PCONTEXT Context) { return SetThreadContext(hThread, Context); }
+        
+        static inline DWORD QueueApc(IN HANDLE hThread, IN PAPCFUNC ApcFunc, IN OPTIONAL PVOID Arg = NULL) { return QueueUserAPC(ApcFunc, hThread, reinterpret_cast<ULONG_PTR>(Arg)); }
+        static inline BOOL Alert() { return NT_SUCCESS(NtApi::NtTestAlert()); }
+        static inline BOOL Alert(IN HANDLE hThread) { return NT_SUCCESS(NtApi::NtAlertThread(hThread)); }
+        
+        static inline BOOL YieldThread() { return SwitchToThread(); }
+
+        static inline BOOL SetPriority(IN HANDLE hThread, IN OPTIONAL INT Priority = THREAD_PRIORITY_NORMAL) { return SetThreadPriority(hThread, Priority); }
+        static inline INT GetPriority(IN HANDLE hThread) { return GetThreadPriority(hThread); }
+        static inline SIZE_T SetAffinity(IN HANDLE hThread, IN SIZE_T AffinityMask) { return SetThreadAffinityMask(hThread, AffinityMask); }
+        static inline HRESULT SetName(IN HANDLE hThread, IN LPCWSTR Name) { return SetThreadDescription(hThread, Name); }
+    };
+
+    class Thread {
+    protected:
+        HANDLE hThread;
+        DWORD ThreadId;
+        LPTHREAD_START_ROUTINE ThreadProc;
+        PVOID Arg;
+    public:
+        Thread(const Thread&) = delete;
+        Thread(Thread&&) = delete;
+        Thread& operator = (const Thread&) = delete;
+        Thread& operator = (Thread&&) = delete;
+
+        Thread(LPTHREAD_START_ROUTINE ThreadProc, IN OPTIONAL PVOID Arg = NULL)
+            : hThread(NULL), ThreadId(0)
+        {
+            this->ThreadProc = ThreadProc;
+            this->Arg = Arg;
+        }
+
+        ~Thread() {
+            if (hThread) {
+                if (!IsTerminated()) {
+                    Threads::Terminate(hThread);
+                }
+                Threads::Close(&hThread);
+            }
+        }
+
+        inline VOID Detach() {
+            if (hThread) {
+                Threads::Close(&hThread);
+            }
+        }
+
+        inline HANDLE Start() {
+            hThread = CreateThread(NULL, 0, ThreadProc, Arg, 0, &ThreadId);
+            return hThread;
+        }
+
+        inline BOOL Stop()
+        {
+            if (hThread) {
+                BOOL Status = Threads::Terminate(hThread);
+                if (Status) Detach();
+                return Status;
+            }
+            else {
+                return FALSE;
+            }
+        }
+
+        inline DWORD Wait(DWORD Timeout = INFINITE) const { return Threads::Wait(hThread, Timeout); }
+        inline BOOL IsTerminated() const { return Threads::IsTerminated(hThread); }
+        inline BOOL GetExitCode(OUT PDWORD ExitCode) const { return Threads::GetExitCode(hThread, ExitCode); }
+        inline DWORD GetExitCode(IN OPTIONAL DWORD DefaultValue = 0) const { return Threads::GetExitCode(hThread, DefaultValue); }
+        
+        inline DWORD Suspend() { return Threads::Suspend(hThread); }
+        inline DWORD Resume() { return Threads::Resume(hThread); }
+
+        inline BOOL Alert() { return Threads::Alert(); }
+        inline DWORD QueueApc(IN PAPCFUNC ApcFunc, IN OPTIONAL PVOID Arg = NULL) { return Threads::QueueApc(hThread, ApcFunc, Arg); }
+
+        inline BOOL GetContext(OUT PCONTEXT Context) { return Threads::GetContext(hThread, Context); }
+        inline BOOL SetContext(IN PCONTEXT Context) { return Threads::SetContext(hThread, Context); }
+
+        inline BOOL YieldThread() { return Threads::YieldThread(); }
+
+        inline HANDLE GetHandle() const { return hThread; }
+        inline DWORD GetThreadId() const { return ThreadId; }
+
+        inline BOOL SetPriority(IN OPTIONAL INT Priority = THREAD_PRIORITY_NORMAL) { return Threads::SetPriority(hThread, Priority); }
+        inline INT GetPriority() { return Threads::GetPriority(hThread); }
+        inline SIZE_T SetAffinity(IN SIZE_T AffinityMask) { return Threads::SetAffinity(hThread, AffinityMask); }
+        inline HRESULT SetName(IN LPCWSTR Name) { return Threads::SetName(hThread, Name); }
+    };
+
+    class AbstractThread : public Thread {
+    protected:
+        static DWORD WINAPI Win32ThreadProc(PVOID Arg)
+        {
+            auto Self = reinterpret_cast<AbstractThread*>(Arg);
+            return Self->ThreadProc();
+        }
+
+        AbstractThread() : Thread(Win32ThreadProc, this) {}
+
+    public:
+        AbstractThread(const AbstractThread&) = delete;
+        AbstractThread(AbstractThread&&) = delete;
+        AbstractThread& operator = (const AbstractThread&) = delete;
+        AbstractThread& operator = (AbstractThread&&) = delete;
+
+        virtual DWORD ThreadProc() = 0;
+    };
 }

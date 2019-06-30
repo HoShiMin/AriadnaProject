@@ -1,39 +1,90 @@
 ﻿#include <cstdio>
+#include <thread>
 
 #include "Ariadna/Ariadna.h"
 
-DWORD WINAPI UmsThread(PVOID Arg)
-{
-    for (int i = 0; i < 3; ++i) {
-        printf("UMS Thread %i\r\n", static_cast<int>(GetCurrentThreadId()));
-        Sleep(100);
-    }
-    printf("UMS Thread %i finished\r\n", static_cast<int>(GetCurrentThreadId()));
-    return 0;
-}
+using namespace Ariadna;
 
-int main()
+void UmsTesting()
 {
-    using namespace Ariadna;
-
     UmsScheduler& Scheduler = UmsScheduler::GetInstance();
     BOOL Status = Scheduler.StartUmsScheduler();
     if (!Status) {
         printf("Unable to run UMS\r\n");
-        return 0;
+        return;
     }
 
     printf("UMS started\r\n");
 
-    Scheduler.StartThread(UmsThread);
-    Scheduler.StartThread(UmsThread);
-    Scheduler.StartThread(UmsThread);
-    Scheduler.StartThread(UmsThread);
+    for (int i = 0; i < 5; ++i) {
+        Scheduler.StartThread([](PVOID) -> DWORD {
+            for (int i = 0; i < 3; ++i) {
+                printf("UMS Thread %i\r\n", static_cast<int>(GetCurrentThreadId()));
+                Sleep(100);
+            }
+            printf("UMS Thread %i finished\r\n", static_cast<int>(GetCurrentThreadId()));
+            return 0;
+        });
+    }
 
     Sleep(1300);
 
     Scheduler.StopUmsScheduler();
     printf("UMS finished\r\n");
+}
+
+void FibersTesting()
+{
+    Fibers::CallInFiber([](PVOID) {
+        printf("Fiber %p in thread %i\r\n", Fibers::Current(), GetCurrentThreadId());
+    });
+
+    printf("Non-fiber main thread %i\r\n", GetCurrentThreadId());
+}
+
+void ThreadsTesting()
+{
+    HANDLE hThread = Threads::StartThread([](PVOID) -> DWORD {
+        while (true) {
+            printf("Thread %i\r\n", Threads::Id());
+            Sleep(1000);
+            Threads::Alert(); // Works
+        }
+    });
+
+    BOOL Status = Threads::QueueApc(hThread, [](ULONG_PTR Arg) {
+        printf("APC in thread %i\r\n", Threads::Id());
+    });
+    Threads::Alert(hThread); // No, it doesn't works at all...
+}
+
+class CustomThread : public AbstractThread {
+private:
+    int SampleValue;
+protected:
+    DWORD ThreadProc() override
+    {
+        printf("Hi from a CustomThread!\r\n");
+        printf("- SampleValue = %i\r\n", SampleValue);
+        return SampleValue;
+    }
+public:
+    CustomThread(int Value) {
+        SampleValue = Value;
+    }
+};
+
+void TestThreadClass()
+{
+    CustomThread thread(1337);
+    thread.Start();
+    thread.Wait();
+    printf("CustomThread is finished with value %i!\r\n", thread.GetExitCode());
+}
+
+int main()
+{
+    TestThreadClass();
 
     MSG Message = {};
     while (GetMessage(&Message, NULL, 0, 0)) {

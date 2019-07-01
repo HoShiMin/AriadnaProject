@@ -3,6 +3,7 @@ This is the Win32 threading library with functions, wrappers and classes with su
 * Usermode scheduling (UMS-threads)
 * Fibers
 * Normal threads
+* Threadpools
 
 #### How to:
 * Usermode scheduling:
@@ -44,7 +45,7 @@ int main()
 int main()
 {
     Ariadna::Fibers::CallInFiber([](PVOID) {
-        printf("Fiber %p in thread %i\r\n", Fibers::Current(), GetCurrentThreadId());
+        printf("Fiber %p in thread %i\r\n", Ariadna::Fibers::Current(), GetCurrentThreadId());
     });
 
     printf("Non-fiber main thread %i\r\n", GetCurrentThreadId());
@@ -113,5 +114,28 @@ int main()
     thread.Wait();
     printf("CustomThread is finished with value %i!\r\n", thread.GetExitCode());
     return 0;
+}
+```
+* Threadpools:
+```cpp
+#include <Windows.h>
+#include "Ariadna.h"
+
+using namespace Ariadna;
+
+static ThreadPool CustomThreadPool;
+
+int main()
+{
+    // Queue to the defaul threadpool:
+    ThreadPool::DefaultQueueWrapped(NULL, [&](int a, int b) {
+        printf("[%u] Hi from threadpool: %i\r\n", Threads::Id(), a + b);
+    }, 10, 20);
+
+    // Queue to the CustomThreadPool:
+    CustomThreadPool.CreatePool(8, 16); // Min: 8 threads; Max: 16 threads
+    CustomThreadPool.QueueWrapped([&](int a, const std::string& b) {
+        printf("[%u] Hi from custom threadpool: %i, %s\r\n", Threads::Id(), a, b.c_str());
+    }, 10, "Sample text");
 }
 ```

@@ -451,18 +451,38 @@ namespace Ariadna {
         
         static inline BOOL YieldThread() { return SwitchToThread(); }
 
-        static inline BOOL SetPriority(IN HANDLE hThread, IN OPTIONAL INT Priority = THREAD_PRIORITY_NORMAL) { return SetThreadPriority(hThread, Priority); }
         static inline INT GetPriority(IN HANDLE hThread) { return GetThreadPriority(hThread); }
+        static inline BOOL SetPriority(IN HANDLE hThread, IN OPTIONAL INT Priority = THREAD_PRIORITY_NORMAL) { return SetThreadPriority(hThread, Priority); }
+        static inline BOOL SetIdlePriority(IN HANDLE hThread) { return SetPriority(hThread, THREAD_PRIORITY_IDLE); }
+        static inline BOOL SetLowestPriority(IN HANDLE hThread) { return SetPriority(hThread, THREAD_PRIORITY_LOWEST); }
+        static inline BOOL SetLowerPriority(IN HANDLE hThread) { return SetPriority(hThread, THREAD_PRIORITY_BELOW_NORMAL); }
+        static inline BOOL SetNormalPriority(IN HANDLE hThread) { return SetPriority(hThread, THREAD_PRIORITY_NORMAL); }
+        static inline BOOL SetHigherPriority(IN HANDLE hThread) { return SetPriority(hThread, THREAD_PRIORITY_ABOVE_NORMAL); }
+        static inline BOOL SetHighestPriority(IN HANDLE hThread) { return SetPriority(hThread, THREAD_PRIORITY_HIGHEST); }
+        static inline BOOL SetRealtimePriority(IN HANDLE hThread) { return SetPriority(hThread, THREAD_PRIORITY_TIME_CRITICAL); }
+        static inline BOOL ResetPriority(IN HANDLE hThread) { return SetNormalPriority(hThread); }
+        
         static inline SIZE_T SetAffinity(IN HANDLE hThread, IN SIZE_T AffinityMask) { return SetThreadAffinityMask(hThread, AffinityMask); }
         static inline HRESULT SetName(IN HANDLE hThread, IN LPCWSTR Name) { return SetThreadDescription(hThread, Name); }
+
+        static DWORD GetProcessorsCount() {
+            SYSTEM_INFO Info = {};
+            GetNativeSystemInfo(&Info);
+            return Info.dwNumberOfProcessors;
+        }
+        static SIZE_T GetActiveProcessorsMask() {
+            SYSTEM_INFO Info = {};
+            GetNativeSystemInfo(&Info);
+            return Info.dwActiveProcessorMask;
+        }
     };
 
     class Thread {
     protected:
-        HANDLE hThread;
-        DWORD ThreadId;
         LPTHREAD_START_ROUTINE ThreadProc;
         PVOID Arg;
+        HANDLE hThread;
+        DWORD ThreadId;
     public:
         Thread(const Thread&) = delete;
         Thread(Thread&&) = delete;
@@ -527,8 +547,17 @@ namespace Ariadna {
         inline HANDLE GetHandle() const { return hThread; }
         inline DWORD GetThreadId() const { return ThreadId; }
 
-        inline BOOL SetPriority(IN OPTIONAL INT Priority = THREAD_PRIORITY_NORMAL) { return Threads::SetPriority(hThread, Priority); }
         inline INT GetPriority() { return Threads::GetPriority(hThread); }
+        inline BOOL SetPriority(IN OPTIONAL INT Priority = THREAD_PRIORITY_NORMAL) { return Threads::SetPriority(hThread, Priority); }
+        inline BOOL SetIdlePriority() { return Threads::SetPriority(hThread, THREAD_PRIORITY_IDLE); }
+        inline BOOL SetLowestPriority() { return Threads::SetPriority(hThread, THREAD_PRIORITY_LOWEST); }
+        inline BOOL SetLowerPriority() { return Threads::SetPriority(hThread, THREAD_PRIORITY_BELOW_NORMAL); }
+        inline BOOL SetNormalPriority() { return Threads::SetPriority(hThread, THREAD_PRIORITY_NORMAL); }
+        inline BOOL SetHigherPriority() { return Threads::SetPriority(hThread, THREAD_PRIORITY_ABOVE_NORMAL); }
+        inline BOOL SetHighestPriority() { return Threads::SetPriority(hThread, THREAD_PRIORITY_HIGHEST); }
+        inline BOOL SetRealtimePriority() { return Threads::SetPriority(hThread, THREAD_PRIORITY_TIME_CRITICAL); }
+        inline BOOL ResetPriority() { return Threads::SetNormalPriority(hThread); }
+
         inline SIZE_T SetAffinity(IN SIZE_T AffinityMask) { return Threads::SetAffinity(hThread, AffinityMask); }
         inline HRESULT SetName(IN LPCWSTR Name) { return Threads::SetName(hThread, Name); }
     };
@@ -579,5 +608,201 @@ namespace Ariadna {
         AbstractThread& operator = (AbstractThread&&) = delete;
 
         virtual DWORD ThreadProc() = 0;
+    };
+
+    class ThreadPool {
+    public:
+        typedef VOID (WINAPI *THREADPOOL_CALLBACK)(IN PVOID Arg);
+    private:
+        PTP_POOL Pool;
+        PTP_CLEANUP_GROUP CleanupGroup;
+        TP_CALLBACK_ENVIRON TpEnv;
+
+        struct WORK_CALLBACK_INFO {
+            THREADPOOL_CALLBACK Callback;
+            PVOID Arg;
+        };
+
+        static VOID NTAPI TpCallbackWrapper(
+            IN OUT PTP_CALLBACK_INSTANCE Instance,
+            IN PVOID Context,
+            IN OUT PTP_WORK Work
+        ) {
+            UNREFERENCED_PARAMETER(Instance);
+            UNREFERENCED_PARAMETER(Work);
+
+            if (!Context) return;
+            
+            auto Info = reinterpret_cast<WORK_CALLBACK_INFO*>(Context);
+            THREADPOOL_CALLBACK Callback = Info->Callback;
+            PVOID Arg = Info->Arg;
+            
+            HeapFree(GetProcessHeap(), 0, Context);
+            
+            Callback(Arg);
+        }
+
+        template <class Tuple, size_t... indices>
+        static VOID NTAPI TpTemplatedWrapper(
+            IN OUT PTP_CALLBACK_INSTANCE Instance,
+            IN PVOID Context,
+            IN OUT PTP_WORK Work
+        ) noexcept {
+            const std::unique_ptr<Tuple> fn_vals(static_cast<Tuple*>(Context));
+            Tuple& tuple = *fn_vals;
+            std::invoke(std::move(std::get<indices>(tuple))...);
+        }
+
+        template <class Tuple, size_t... indices>
+        static constexpr auto get_invoke(std::index_sequence<indices...>) noexcept
+        {
+            return &TpTemplatedWrapper<Tuple, indices...>;
+        }
+    public:
+        ThreadPool()
+            : Pool(NULL), CleanupGroup(NULL), TpEnv({})
+        {}
+
+        BOOL CreatePool(IN DWORD ThreadsMinimum, IN DWORD ThreadsMaximum)
+        {
+            if (Pool) return FALSE; // Already created
+            Pool = CreateThreadpool(NULL);
+            if (!Pool) return FALSE;
+
+            if (!SetThreadpoolThreadMinimum(Pool, ThreadsMinimum)) {
+                CloseThreadpool(Pool);
+                Pool = NULL;
+                return FALSE;
+            }
+            SetThreadpoolThreadMaximum(Pool, ThreadsMaximum);
+
+            InitializeThreadpoolEnvironment(&TpEnv);
+            SetThreadpoolCallbackPool(&TpEnv, Pool);
+
+            CleanupGroup = CreateThreadpoolCleanupGroup();
+            if (!CleanupGroup) {
+                CloseThreadpool(Pool);
+                Pool = NULL;
+                TpEnv = {};
+                return FALSE;
+            }
+
+            SetThreadpoolCallbackCleanupGroup(&TpEnv, CleanupGroup, NULL);
+            return TRUE;
+        }
+
+        BOOL IsPoolCreated() const { return Pool != NULL; }
+
+        BOOL DestroyPool(BOOL WaitForCallbacksCompletion)
+        {
+            if (!Pool) return FALSE; // Not existed
+            CloseThreadpoolCleanupGroupMembers(CleanupGroup, !WaitForCallbacksCompletion, NULL);
+            CloseThreadpoolCleanupGroup(CleanupGroup);
+            CloseThreadpool(Pool);
+            Pool = NULL;
+            CleanupGroup = NULL;
+            TpEnv = {};
+            return TRUE;
+        }
+
+        static inline VOID Submit(IN PTP_WORK Work) { SubmitThreadpoolWork(Work); }
+
+        static inline PTP_WORK CreateWork(
+            IN OPTIONAL PTP_CALLBACK_ENVIRON Env,
+            IN PTP_WORK_CALLBACK Callback,
+            IN OPTIONAL PVOID Arg = NULL
+        ) {
+            return CreateThreadpoolWork(Callback, Arg, Env);
+        }
+
+        static inline PTP_WORK Queue(
+            IN OPTIONAL PTP_CALLBACK_ENVIRON Env,
+            IN PTP_WORK_CALLBACK Callback,
+            IN OPTIONAL PVOID Arg = NULL
+        ) {
+            // It is not necessary to close work item, cleanup manager closes it automatically:
+            PTP_WORK Work = CreateWork(Env, Callback, Arg);
+            if (!Work) return NULL;
+            Submit(Work);
+            return Work;
+        }
+
+        static PTP_WORK Queue(
+            IN OPTIONAL PTP_CALLBACK_ENVIRON Env,
+            IN THREADPOOL_CALLBACK Callback,
+            IN OPTIONAL PVOID Arg = NULL
+        ) {
+            auto CallbackInfo = reinterpret_cast<WORK_CALLBACK_INFO*>(HeapAlloc(GetProcessHeap(), 0, sizeof(WORK_CALLBACK_INFO)));
+            if (!CallbackInfo) return FALSE;
+            CallbackInfo->Callback = Callback;
+            CallbackInfo->Arg = Arg;
+            PTP_WORK Work = Queue(Env, TpCallbackWrapper, CallbackInfo);
+            if (!Work)
+                HeapFree(GetProcessHeap(), 0, CallbackInfo);
+            return Work;
+        }
+
+        // Queue to the default threadpool:
+        static PTP_WORK QueueDefault(
+            IN PTP_WORK_CALLBACK Callback,
+            IN OPTIONAL PVOID Arg = NULL
+        ) {
+            return Queue(NULL, Callback, Arg);
+        }
+
+        // Queue to the default threadpool:
+        static PTP_WORK QueueDefault(
+            IN THREADPOOL_CALLBACK Callback,
+            IN OPTIONAL PVOID Arg = NULL
+        ) {
+            return Queue(NULL, Callback, Arg);
+        }
+
+        static PTP_WORK Wait(IN PTP_WORK Work, IN BOOL CancelPendingCallbacks) { WaitForThreadpoolWorkCallbacks(Work, CancelPendingCallbacks); }
+
+        static inline VOID CloseWork(IN PTP_WORK Work) { CloseThreadpoolWork(Work); }
+
+        PTP_WORK CreateWork(
+            IN PTP_WORK_CALLBACK Callback,
+            IN OPTIONAL PVOID Arg = NULL
+        ) {
+            return CreateWork(&TpEnv, Callback, Arg);
+        }
+
+        PTP_WORK Queue(IN PTP_WORK_CALLBACK Callback, IN OPTIONAL PVOID Arg = NULL)
+        {
+            return Pool ? Queue(&TpEnv, Callback, Arg) : NULL;
+        }
+
+        PTP_WORK Queue(
+            IN THREADPOOL_CALLBACK Callback,
+            IN OPTIONAL PVOID Arg = NULL
+        ) {
+            return Pool ? Queue(&TpEnv, Callback, Arg) : NULL;
+        }
+
+        template <class Func, class... Args, class = std::enable_if_t<!std::is_same_v<std::_Remove_cvref_t<Func>, Thread>>>
+        static PTP_WORK DefaultQueueWrapped(IN OPTIONAL PTP_CALLBACK_ENVIRON Env, Func&& func, Args&& ... args)
+        {
+            using FuncTuple = std::tuple<std::decay_t<Func>, std::decay_t<Args>...>;
+            auto decay_copied = std::make_unique<FuncTuple>(std::forward<Func>(func), std::forward<Args>(args)...);
+            constexpr auto invoker = get_invoke<FuncTuple>(std::make_index_sequence<1 + sizeof...(Args)>{});
+            PTP_WORK Work = Queue(Env, reinterpret_cast<PTP_WORK_CALLBACK>(invoker), decay_copied.get());
+            if (Work)
+                decay_copied.release(); // Ownership transferred to the thread
+            return Work;
+        }
+
+        template <class Func, class... Args, class = std::enable_if_t<!std::is_same_v<std::_Remove_cvref_t<Func>, Thread>>>
+        PTP_WORK QueueWrapped(Func&& func, Args&& ... args)
+        {
+            using FuncTuple = std::tuple<std::decay_t<Func>, std::decay_t<Args>...>;
+            auto decay_copied = std::make_unique<FuncTuple>(std::forward<Func>(func), std::forward<Args>(args)...);
+            constexpr auto invoker = get_invoke<FuncTuple>(std::make_index_sequence<1 + sizeof...(Args)>{});
+            PTP_WORK Work = Queue(&TpEnv, reinterpret_cast<PTP_WORK_CALLBACK>(invoker), decay_copied.get());
+            if (Work)
+                decay_copied.release(); // Ownership transferred to the thread
+            return Work;
+        }
     };
 }

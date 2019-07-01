@@ -1,5 +1,6 @@
 ﻿#include <cstdio>
 #include <thread>
+#include <string>
 
 #include "Ariadna/Ariadna.h"
 
@@ -82,8 +83,20 @@ void TestThreadClass()
     printf("CustomThread is finished with value %i!\r\n", thread.GetExitCode());
 }
 
+
 int main()
 {
+    ThreadPool::DefaultQueueWrapped(NULL, [&](int a, int b) {
+        printf("[%u] Hi from threadpool: %i\r\n", Threads::Id(), a + b);
+    }, 10, 20);
+
+    ThreadPool CustomThreadPool;
+    CustomThreadPool.CreatePool(8, 16);
+    CustomThreadPool.QueueWrapped([&](int a, const std::string& b) {
+        printf("[%u] Hi from custom threadpool: %i, %s\r\n", Threads::Id(), a, b.c_str());
+    }, 10, "Sample text");
+
+
     volatile int i = 1337; // Value that will be pass to another thread
 
     // Run async task:
